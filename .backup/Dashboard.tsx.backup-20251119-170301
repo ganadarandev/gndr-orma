@@ -1,0 +1,2810 @@
+import { useEffect, useState, useRef, useCallback } from 'react'
+import { LogOut, Upload, ZoomIn, ZoomOut, FileSpreadsheet, RefreshCw, Save } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import toast from 'react-hot-toast'
+import { useAuthStore } from '../store/authStore'
+import { excelAPI, workDraftAPI, paymentAPI, ordersAPI, clientsAPI } from '../services/api'
+import SpreadsheetView from '../components/SpreadsheetView'
+import FileManagement from '../components/FileManagement'
+import PaymentManagement from './PaymentManagement'
+import OrderManagement from './OrderManagement'
+import ClientManagement from './ClientManagement'
+import UnsavedChangesModal from '../components/UnsavedChangesModal'
+
+interface SheetData {
+  sheet_name: string
+  sheet_type?: string
+  data: any[][]
+  columns: string[]
+  rows: number
+  cols: number
+  file_path?: string
+  loaded_at?: string
+  // 시트별 독립적인 상태 저장
+  rowColors?: {[key: number]: string}
+  rowTextColors?: {[key: number]: string}
+  duplicateProducts?: {[key: number]: string}
+  checkedRows?: {[key: number]: boolean}
+}
+
+function Dashboard() {
+  const navigate = useNavigate()
+  const { username, clearAuth } = useAuthStore()
+  const [sheets, setSheets] = useState<SheetData[]>([])
+  const [selectedSheet, setSelectedSheet] = useState<number>(0)
+  const [loading, setLoading] = useState(true)
+  const [zoom, setZoom] = useState(100)
+  const [activeTab, setActiveTab] = useState<'spreadsheet' | 'fileManagement' | 'paymentManagement' | 'orderManagement' | 'clientManagement'>('spreadsheet')
+  // const [showWorkInProgressDialog, setShowWorkInProgressDialog] = useState(false) // 비활성화
+  // const [workInProgressFile, setWorkInProgressFile] = useState<string>('') // 비활성화
+  const [isOrderReceiptUploaded, setIsOrderReceiptUploaded] = useState(false)
+  const [isReceiptSlipUploaded, setIsReceiptSlipUploaded] = useState(false)
+  const [rowColors, setRowColors] = useState<{[key: number]: string}>({})
+  const [rowTextColors, setRowTextColors] = useState<{[key: number]: string}>({})
+  const [duplicateProducts, setDuplicateProducts] = useState<{[key: number]: string}>({})
+
+  // 체크박스 관련 state
+  const [checkedRows, setCheckedRows] = useState<{[key: number]: boolean}>({})
+  const [showSaveModal, setShowSaveModal] = useState(false)
+  const [saveFileName, setSaveFileName] = useState('')
+
+  // 시트 이름 편집 관련 state
+  const [editingSheet, setEditingSheet] = useState<number | null>(null)
+  const [editingName, setEditingName] = useState<string>('')
+
+  // 되돌리기용 백업 state
+  const [backupBeforeDelete, setBackupBeforeDelete] = useState<{
+    data: any[][],
+    checkedRows: {[key: number]: boolean},
+    rowColors: {[key: number]: string},
+    rowTextColors: {[key: number]: string}
+  } | null>(null)
+
+  // 입금 관리 모달 state (스프레드시트에서 입금 관리로 보내기 버튼용)
+  const [showPaymentDateModal, setShowPaymentDateModal] = useState(false)
+  const [selectedPaymentDate, setSelectedPaymentDate] = useState<string>(new Date().toISOString().split('T')[0])
+
+  // 발주 관리 모달 state
+  const [showOrderDateModal, setShowOrderDateModal] = useState(false)
+  const [selectedOrderDate, setSelectedOrderDate] = useState<string>(new Date().toISOString().split('T')[0])
+  const [orderType, setOrderType] = useState<'교환' | '미송' | '기타'>('교환')
+
+  // 거래처 정보 모달 state
+  const [showClientInfoModal, setShowClientInfoModal] = useState(false)
+  const [selectedClientInfo, setSelectedClientInfo] = useState<any>(null)
+  const [loadingClientInfo, setLoadingClientInfo] = useState(false)
+
+  // 체크박스 핸들러
+  const handleCheckRow = (rowIndex: number, checked: boolean) => {
+    setCheckedRows(prev => ({
+      ...prev,
+      [rowIndex]: checked
+    }))
+  }
+
+  // 시트 전환 시 현재 시트의 상태를 저장하고 새 시트의 상태를 로드
+  useEffect(() => {
+    if (sheets.length === 0) return
+
+    // 현재 선택된 시트의 상태를 로드
+    const currentSheet = sheets[selectedSheet]
+    if (currentSheet) {
+      setRowColors(currentSheet.rowColors || {})
+      setRowTextColors(currentSheet.rowTextColors || {})
+      setDuplicateProducts(currentSheet.duplicateProducts || {})
+      setCheckedRows(currentSheet.checkedRows || {})
+    }
+  }, [selectedSheet, sheets])
+
+  // 상태 변경 시 현재 시트에 저장
+  useEffect(() => {
+    if (sheets.length === 0 || !sheets[selectedSheet]) return
+
+    // 현재 시트의 상태 업데이트
+    const updatedSheets = [...sheets]
+    updatedSheets[selectedSheet] = {
+      ...updatedSheets[selectedSheet],
+      rowColors,
+      rowTextColors,
+      duplicateProducts,
+      checkedRows
+    }
+    setSheets(updatedSheets)
+  }, [rowColors, rowTextColors, duplicateProducts, checkedRows])
+
+  // 되돌리기 버튼 핸들러
+  const handleUndoDelete = () => {
+    if (!backupBeforeDelete) {
+      toast.error('되돌릴 내역이 없습니다')
+      return
+    }
+
+    // 백업된 데이터로 복원
+    const updatedSheets = [...sheets]
+    updatedSheets[selectedSheet] = {
+      ...updatedSheets[selectedSheet],
+      data: backupBeforeDelete.data
+    }
+    setSheets(updatedSheets)
+    setCheckedRows(backupBeforeDelete.checkedRows)
+    setRowColors(backupBeforeDelete.rowColors)
+    setRowTextColors(backupBeforeDelete.rowTextColors)
+    setBackupBeforeDelete(null)
+
+    toast.success('삭제 전 상태로 복원되었습니다')
+  }
+
+  // 시트 이름 편집 관련 핸들러
+  const handleStartEditingSheetName = (index: number) => {
+    setEditingSheet(index)
+    setEditingName(sheets[index].sheet_name)
+  }
+
+  const handleSaveSheetName = (index: number) => {
+    if (editingName.trim()) {
+      const updatedSheets = [...sheets]
+      updatedSheets[index].sheet_name = editingName.trim()
+      setSheets(updatedSheets)
+      setEditingSheet(null)
+      setEditingName('')
+      toast.success('시트 이름이 변경되었습니다')
+    } else {
+      toast.error('시트 이름을 입력해주세요')
+    }
+  }
+
+  const handleCancelEditingSheetName = () => {
+    setEditingSheet(null)
+    setEditingName('')
+  }
+
+  // 거래처명 클릭 핸들러 - 거래처 정보 조회
+  const handleClientNameClick = async (companyName: string) => {
+    if (!companyName || companyName.trim() === '') {
+      return
+    }
+
+    try {
+      setLoadingClientInfo(true)
+      setShowClientInfoModal(true)
+
+      // 거래처명으로 검색
+      const response = await clientsAPI.listClients(companyName.trim())
+
+      if (response.clients && response.clients.length > 0) {
+        // 정확히 일치하는 거래처 찾기
+        const exactMatch = response.clients.find((c: any) =>
+          c.company_name === companyName.trim()
+        )
+        setSelectedClientInfo(exactMatch || response.clients[0])
+      } else {
+        setSelectedClientInfo(null)
+        toast.error('거래처 정보를 찾을 수 없습니다')
+      }
+    } catch (error) {
+      console.error('Error fetching client info:', error)
+      setSelectedClientInfo(null)
+      toast.error('거래처 정보 조회 실패')
+    } finally {
+      setLoadingClientInfo(false)
+    }
+  }
+
+  // 입금 관리로 보내기 버튼 클릭 (모달 표시)
+  const moveCheckedToPayment = () => {
+    if (!sheets[selectedSheet]?.data) return
+
+    const data = sheets[selectedSheet].data
+    let hasChecked = false
+
+    // 체크된 항목이 있는지 확인
+    for (let i = 4; i < data.length; i++) {
+      if (checkedRows[i]) {
+        hasChecked = true
+        break
+      }
+    }
+
+    if (!hasChecked) {
+      toast.error('체크된 항목이 없습니다')
+      return
+    }
+
+    // 입금일자 선택 모달 표시
+    setShowPaymentDateModal(true)
+  }
+
+  // 입금일자 확인 후 실제로 입금 관리로 이동
+  const confirmPaymentDate = async () => {
+    if (!sheets[selectedSheet]?.data) return
+
+    const data = sheets[selectedSheet].data
+    const checkedItems: any[][] = []
+
+    // 헤더 행들(0-3)은 그대로 포함
+    for (let i = 0; i < 4 && i < data.length; i++) {
+      checkedItems.push([...data[i]])
+    }
+
+    // 체크된 데이터 행들 수집
+    const checkedRowsData: any[][] = []
+    for (let i = 4; i < data.length; i++) {
+      if (checkedRows[i]) {
+        const row = [...data[i]]
+        // T열(인덱스 19)에 입금액 계산: H(인덱스 7) * O(인덱스 14)
+        const hValue = parseFloat(row[7]) || 0
+        const oValue = parseFloat(row[14]) || 0
+        row[19] = hValue * oValue
+        checkedRowsData.push(row)
+      }
+    }
+
+    // B열(공급처주소)에서 건물명 추출 함수
+    const extractBuilding = (address: string): string => {
+      if (!address) return '기타'
+
+      // 건물명 패턴: "디오트", "신평화", "청평화", "신발상가" 등
+      // 주의: 긴 패턴을 먼저 체크 (예: "신평화" 전에 "평화시장"을 체크하면 오매칭)
+      const buildingPatterns = [
+        'APM', 'apm', 'Apm',  // APM 계열
+        '누죤', '누존',  // 누죤
+        '스튜디오W', '스튜디오w',  // 스튜디오W
+        '테크노',  // 테크노
+        '디오트', '신평화', '청평화', '신발상가', '평화시장', '동평화',
+        '남평화', '서평화', '북평화', '중앙상가', '제일상가'
+      ]
+
+      for (const pattern of buildingPatterns) {
+        if (address.includes(pattern)) {
+          // APM 계열은 대문자로 통일
+          if (pattern.toLowerCase() === 'apm') return 'APM'
+          return pattern
+        }
+      }
+
+      return '기타'
+    }
+
+    // 층수 추출 (지하는 음수로 변환하여 정렬 가능하게)
+    const extractFloor = (address: string): number => {
+      // 지하 X층 패턴
+      const basementMatch = address.match(/지하\s*(\d+)층/)
+      if (basementMatch) {
+        return -parseInt(basementMatch[1])  // 지하는 음수로 (지하3층 = -3, 지하1층 = -1)
+      }
+
+      // 일반 X층 패턴
+      const floorMatch = address.match(/(\d+)층/)
+      if (floorMatch) {
+        return parseInt(floorMatch[1])  // 지상층은 양수
+      }
+
+      return 0  // 층수 정보 없음
+    }
+
+    // 공급처주소(B열) 기준으로 정렬: 건물명 → 층수 → 거래처명
+    checkedRowsData.sort((a, b) => {
+      const addressA = (a[1] || '').toString() // B열: 공급처주소
+      const addressB = (b[1] || '').toString()
+
+      const buildingA = extractBuilding(addressA)
+      const buildingB = extractBuilding(addressB)
+
+      // 1. 건물명으로 먼저 정렬
+      if (buildingA !== buildingB) {
+        return buildingA.localeCompare(buildingB, 'ko-KR')
+      }
+
+      // 2. 같은 건물이면 층수로 정렬
+      const floorA = extractFloor(addressA)
+      const floorB = extractFloor(addressB)
+      if (floorA !== floorB) {
+        return floorA - floorB
+      }
+
+      // 3. 같은 층이면 거래처명으로 정렬
+      const nameA = (a[0] || '').toString()
+      const nameB = (b[0] || '').toString()
+      return nameA.localeCompare(nameB, 'ko-KR')
+    })
+
+    // 정렬된 데이터를 추가하면서 구분선 삽입
+    const rowColors: {[key: number]: string} = {}
+    let prevBuilding = ''
+    let prevCompanyName = ''
+    let currentRowIndex = 4 // 헤더 4행 이후부터 시작
+
+    for (let i = 0; i < checkedRowsData.length; i++) {
+      const row = checkedRowsData[i]
+      const address = (row[1] || '').toString()
+      const currentBuilding = extractBuilding(address)
+      const currentCompanyName = (row[0] || '').toString()
+
+      // 1. 건물이 바뀌면 회색 빈 행 추가
+      if (i > 0 && prevBuilding !== currentBuilding && prevBuilding !== '') {
+        const emptyRow = new Array(row.length).fill('')
+        checkedItems.push(emptyRow)
+        rowColors[currentRowIndex] = '#d1d5db' // 회색 배경
+        currentRowIndex++
+      }
+      // 2. 같은 건물 내에서 거래처가 바뀌면 흰색 빈 행 추가
+      else if (i > 0 && prevBuilding === currentBuilding && prevCompanyName !== currentCompanyName && prevCompanyName !== '') {
+        const emptyRow = new Array(row.length).fill('')
+        checkedItems.push(emptyRow)
+        // 흰색 배경은 기본이므로 별도 설정 불필요
+        currentRowIndex++
+      }
+
+      checkedItems.push(row)
+      currentRowIndex++
+      prevBuilding = currentBuilding
+      prevCompanyName = currentCompanyName
+    }
+
+    if (checkedItems.length <= 4) {
+      toast.error('체크된 항목이 없습니다')
+      setShowPaymentDateModal(false)
+      return
+    }
+
+    // DB에 저장
+    const loadingToast = toast.loading('입금 내역 저장 중...')
+    try {
+      await paymentAPI.savePaymentData({
+        payment_date: selectedPaymentDate,
+        data: checkedItems,
+        created_by: username || 'unknown'
+      })
+
+      // 저장 완료 후 입금 관리 탭으로 이동
+      setShowPaymentDateModal(false)
+      setActiveTab('paymentManagement')
+      toast.success(`${checkedItems.length - 4}개 항목이 ${selectedPaymentDate} 입금 내역으로 저장되었습니다`, { id: loadingToast })
+
+      // 날짜를 MMDD 형식으로 변환
+      const dateObj = new Date(selectedPaymentDate)
+      const mmdd = `${String(dateObj.getMonth() + 1).padStart(2, '0')}${String(dateObj.getDate()).padStart(2, '0')}`
+
+      // 백업 생성 (되돌리기를 위해) - 삭제 전 상태 저장
+      setBackupBeforeDelete({
+        data: [...data.map(row => [...row])], // Deep copy
+        checkedRows: {...checkedRows},
+        rowColors: {...rowColors},
+        rowTextColors: {...rowTextColors}
+      })
+
+      // 체크된 행들을 스프레드시트에서 삭제하고 재정렬
+      const updatedSheets = [...sheets]
+      const newData: any[][] = []
+      // const newCheckedRows: {[key: number]: boolean} = {}
+      const newRowColors: {[key: number]: string} = {}
+      const newRowTextColors: {[key: number]: string} = {}
+
+      // 헤더 행들(0-3)은 유지
+      for (let i = 0; i < 4 && i < data.length; i++) {
+        newData.push(data[i])
+        if (rowColors[i]) newRowColors[i] = rowColors[i]
+        if (rowTextColors[i]) newRowTextColors[i] = rowTextColors[i]
+      }
+
+      // 체크되지 않은 데이터 행들만 수집 (빈 행 제외)
+      const remainingRows: any[][] = []
+      const remainingRowTextColors: {[key: number]: string} = {}
+
+      for (let i = 4; i < data.length; i++) {
+        if (!checkedRows[i]) {
+          const row = data[i]
+          // 빈 행 체크: A열(거래처명), B열(공급처주소), E열(상품명) 중 하나라도 있으면 데이터 행으로 간주
+          const hasData = (row[0] && row[0] !== '') || // A열: 거래처명
+                         (row[1] && row[1] !== '') || // B열: 공급처주소
+                         (row[4] && row[4] !== '')    // E열: 공급처상품명
+          if (hasData) {
+            const rowIdx = remainingRows.length
+            remainingRows.push(row)
+            // rowTextColors 보존 (교환 항목 등)
+            if (rowTextColors[i]) {
+              remainingRowTextColors[rowIdx] = rowTextColors[i]
+            }
+          }
+        }
+      }
+
+      // 주소 파싱 함수 (SORTING_RULES.md 기준)
+      const parseAddress = (address: string): { building: string; floor: number; room: number } => {
+        if (!address) return { building: '', floor: 0, room: 0 }
+
+        const addr = address.toString().trim()
+
+        // 건물명 추출 (첫 번째 단어 또는 "층" 이전까지)
+        const buildingMatch = addr.match(/^([가-힣a-zA-Z\s]+?)(?=\s*(?:지하|B\s*\d|\d+층|$))/)
+        const building = buildingMatch ? buildingMatch[1].trim() : addr
+
+        // 층수 추출
+        let floor = 0
+        // 지하 패턴: "지하 3층", "지하3층", "B 3층", "B3"
+        const basementMatch = addr.match(/(?:지하|B)\s*(\d+)/)
+        if (basementMatch) {
+          floor = -parseInt(basementMatch[1]) // 지하는 음수
+        } else {
+          // 지상 패턴: "3층", "F 3층", "3F"
+          const floorMatch = addr.match(/(?:F\s*)?(\d+)(?:층|F)/)
+          if (floorMatch) {
+            floor = parseInt(floorMatch[1])
+          }
+        }
+
+        // 호실 추출: "101호", "호실 101"
+        let room = 0
+        const roomMatch = addr.match(/(?:호실\s*)?(\d+)호/)
+        if (roomMatch) {
+          room = parseInt(roomMatch[1])
+        }
+
+        return { building, floor, room }
+      }
+
+      // 정렬 기준: 공급처주소 (건물명 → 층수 → 호실) → 거래처명
+      remainingRows.sort((a, b) => {
+        // 공급처주소 (B열, index 1)에서 정보 추출
+        const addrA = parseAddress(a[1] || '')
+        const addrB = parseAddress(b[1] || '')
+
+        // 1차: 건물명 비교 (가나다순)
+        if (!addrA.building && addrB.building) return 1
+        if (addrA.building && !addrB.building) return -1
+
+        const buildingCompare = addrA.building.localeCompare(addrB.building, 'ko-KR')
+        if (buildingCompare !== 0) return buildingCompare
+
+        // 2차: 층수 비교 (지하는 역순, 지상은 정순)
+        // floor가 음수면 지하, 양수면 지상
+        if (addrA.floor !== addrB.floor) {
+          return addrA.floor - addrB.floor // -3, -2, -1, 0, 1, 2, 3 순서
+        }
+
+        // 3차: 호실 비교 (오름차순)
+        if (addrA.room !== addrB.room) {
+          return addrA.room - addrB.room
+        }
+
+        // 4차: 거래처명 비교 (가나다순)
+        const companyA = (a[0] || '').toString().trim()
+        const companyB = (b[0] || '').toString().trim()
+
+        if (!companyA && companyB) return 1
+        if (companyA && !companyB) return -1
+
+        return companyA.localeCompare(companyB, 'ko-KR')
+      })
+
+      // 정렬된 데이터를 추가하면서 건물/거래처별 구분선 삽입
+      let prevBuilding = ''
+      let prevCompany = ''
+      let currentRowIndex = 4
+
+      for (let i = 0; i < remainingRows.length; i++) {
+        const row = remainingRows[i]
+        const address = (row[1] || '').toString() // B열: 공급처주소
+        const currentBuilding = parseAddress(address).building
+        const currentCompany = (row[0] || '').toString().trim() // A열: 거래처명
+
+        // 1. 건물이 바뀌면 회색 빈 행 추가 (첫 번째 행 제외)
+        if (i > 0 && prevBuilding !== currentBuilding && prevBuilding !== '') {
+          const emptyRow = new Array(row.length).fill('')
+          newData.push(emptyRow)
+          newRowColors[currentRowIndex] = '#d1d5db' // 회색 배경
+          currentRowIndex++
+        }
+        // 2. 같은 건물 내에서 거래처명이 바뀌면 흰색 빈 행 추가
+        else if (i > 0 && prevBuilding === currentBuilding && prevCompany !== currentCompany && prevCompany !== '') {
+          const emptyRow = new Array(row.length).fill('')
+          newData.push(emptyRow)
+          // 흰색 배경은 기본이므로 별도 설정 불필요
+          currentRowIndex++
+        }
+
+        newData.push(row)
+        // rowTextColors 재매핑
+        if (remainingRowTextColors[i]) {
+          newRowTextColors[currentRowIndex] = remainingRowTextColors[i]
+        }
+        currentRowIndex++
+        prevBuilding = currentBuilding
+        prevCompany = currentCompany
+      }
+
+      // 업데이트된 데이터로 시트 갱신
+      updatedSheets[selectedSheet] = {
+        ...updatedSheets[selectedSheet],
+        data: newData
+      }
+      setSheets(updatedSheets)
+      setCheckedRows({}) // 체크 상태 초기화
+      setRowColors(newRowColors)
+      setRowTextColors(newRowTextColors)
+
+      // 3개 파일 저장 (매칭, 정상, 오류)
+      try {
+        const { savedFilesAPI } = await import('../services/api')
+
+        await savedFilesAPI.saveThreeFiles({
+          date: mmdd,
+          matched_data: {
+            data: data,
+            columns: sheets[selectedSheet].columns,
+            row_colors: rowColors,
+            row_text_colors: rowTextColors
+          },
+          normal_data: {
+            data: checkedItems,
+            columns: sheets[selectedSheet].columns,
+            row_colors: rowColors,
+            row_text_colors: {}
+          },
+          error_data: {
+            data: newData,
+            columns: sheets[selectedSheet].columns,
+            row_colors: newRowColors,
+            row_text_colors: newRowTextColors
+          },
+          created_by: username || 'unknown'
+        })
+
+        console.log(`3개 파일이 ${mmdd} 날짜로 저장되었습니다`)
+      } catch (fileError: any) {
+        console.error('File save error:', fileError)
+        // 파일 저장 실패해도 입금 관리는 성공했으므로 에러 토스트만 표시
+        toast.error(`파일 저장 실패: ${fileError.message}`)
+      }
+
+    } catch (error: any) {
+      console.error('Payment save error:', error)
+      toast.error(`저장 실패: ${error.message}`, { id: loadingToast })
+    }
+  }
+
+  // 발주 관리로 보내기 버튼 클릭 (모달 표시)
+  const moveCheckedToOrder = () => {
+    if (!sheets[selectedSheet]?.data) return
+
+    const data = sheets[selectedSheet].data
+    let hasChecked = false
+
+    // 체크된 항목이 있는지 확인
+    for (let i = 4; i < data.length; i++) {
+      if (checkedRows[i]) {
+        hasChecked = true
+        break
+      }
+    }
+
+    if (!hasChecked) {
+      toast.error('체크된 항목이 없습니다')
+      return
+    }
+
+    // 발주일자 선택 모달 표시
+    setShowOrderDateModal(true)
+  }
+
+  // 발주일자 확인 후 실제로 발주 관리로 이동
+  const confirmOrderDate = async () => {
+    if (!sheets[selectedSheet]?.data) return
+
+    const data = sheets[selectedSheet].data
+    const orderItems: any[][] = []
+
+    // 헤더 행들(0-3)은 그대로 포함
+    for (let i = 0; i < 4 && i < data.length; i++) {
+      orderItems.push([...data[i]])
+    }
+
+    // 체크된 데이터 행들을 수집하면서 발주 규칙 적용
+    const orderRowsData: any[][] = []
+    for (let i = 4; i < data.length; i++) {
+      if (checkedRows[i]) {
+        const row = [...data[i]]
+
+        // 규칙 1: I열에 숫자가 있고 L열과 O열이 비어있는 경우 (미송)
+        const iValue = parseFloat(row[8]) || 0  // I열: 신규 주문
+        const lValue = parseFloat(row[11]) || 0 // L열: 장끼 미송
+        const oValue = parseFloat(row[14]) || 0 // O열: 입고
+        const qValue = row[16] || ''             // Q열: 삼촌 코멘트
+
+        if (iValue > 0 && lValue === 0 && oValue === 0) {
+          // I열 값을 J열로 이동 (미송)
+          row[9] = iValue
+          row[8] = '' // I열 비우기
+          // Q열 값을 R열로 이동
+          if (qValue) {
+            row[17] = qValue
+            row[16] = '' // Q열 비우기
+          }
+          orderRowsData.push(row)
+          continue
+        }
+
+        // 규칙 2: K열에 교환 개수가 있고 N, O 열이 비어있는 경우
+        const kValue = parseFloat(row[10]) || 0 // K열: 교환
+        const nValue = parseFloat(row[13]) || 0 // N열: 장끼 교환
+
+        if (kValue > 0 && nValue === 0 && oValue === 0) {
+          // 행을 그대로 발주 관리로 이동
+          orderRowsData.push(row)
+          continue
+        }
+      }
+    }
+
+    // 수집된 행들을 orderItems에 추가
+    orderItems.push(...orderRowsData)
+
+    if (orderItems.length <= 4) {
+      toast.error('발주 조건에 맞는 항목이 없습니다')
+      setShowOrderDateModal(false)
+      return
+    }
+
+    // DB에 저장
+    const loadingToast = toast.loading('발주 내역 저장 중...')
+    try {
+      // ordersAPI를 통해 백엔드에 저장
+      const response = await ordersAPI.saveOrders({
+        order_date: selectedOrderDate,
+        company_name: '통합', // 여러 거래처가 섞여있을 수 있음
+        order_type: orderType,
+        items: orderItems.slice(4) // 헤더 4행 제외
+      })
+
+      if (response.success) {
+        // 발주 관리 탭으로 이동
+        setShowOrderDateModal(false)
+        setActiveTab('orderManagement')
+        toast.success(`${orderItems.length - 4}개 항목이 발주 관리에 저장되었습니다`, { id: loadingToast })
+      } else {
+        throw new Error(response.message || '발주 저장에 실패했습니다')
+      }
+
+      // 백업 생성 (되돌리기를 위해)
+      setBackupBeforeDelete({
+        data: [...data.map(row => [...row])],
+        checkedRows: {...checkedRows},
+        rowColors: {...rowColors},
+        rowTextColors: {...rowTextColors}
+      })
+
+      // 체크된 행들을 스프레드시트에서 삭제하고 재정렬
+      const updatedSheets = [...sheets]
+      const newData: any[][] = []
+      const newRowColors: {[key: number]: string} = {}
+      const newRowTextColors: {[key: number]: string} = {}
+
+      // 헤더 행들(0-3)은 유지
+      for (let i = 0; i < 4 && i < data.length; i++) {
+        newData.push(data[i])
+        if (rowColors[i]) newRowColors[i] = rowColors[i]
+        if (rowTextColors[i]) newRowTextColors[i] = rowTextColors[i]
+      }
+
+      // 체크되지 않은 데이터 행들만 수집 (빈 행 제외)
+      const remainingRows: any[][] = []
+      const remainingRowTextColors: {[key: number]: string} = {}
+      const remainingRowColors: {[key: number]: string} = {}
+
+      for (let i = 4; i < data.length; i++) {
+        if (!checkedRows[i]) {
+          const row = data[i]
+          const hasData = (row[0] && row[0] !== '') || (row[1] && row[1] !== '') || (row[4] && row[4] !== '')
+          if (hasData) {
+            const rowIdx = remainingRows.length
+            remainingRows.push(row)
+            if (rowTextColors[i]) {
+              remainingRowTextColors[rowIdx] = rowTextColors[i]
+            }
+            if (rowColors[i]) {
+              remainingRowColors[rowIdx] = rowColors[i]
+            }
+          }
+        }
+      }
+
+      // parseAddress 함수 (정렬용)
+      const parseAddress = (address: string): { building: string; floor: number; room: number } => {
+        if (!address) return { building: '', floor: 0, room: 0 }
+        const addr = address.toString().trim()
+        const buildingMatch = addr.match(/^([가-힣a-zA-Z\s]+?)(?=\s*(?:지하|B\s*\d|\d+층|$))/)
+        const building = buildingMatch ? buildingMatch[1].trim() : addr
+        let floor = 0
+        const basementMatch = addr.match(/(?:지하|B)\s*(\d+)/)
+        if (basementMatch) {
+          floor = -parseInt(basementMatch[1])
+        } else {
+          const floorMatch = addr.match(/(?:F\s*)?(\d+)(?:층|F)/)
+          if (floorMatch) {
+            floor = parseInt(floorMatch[1])
+          }
+        }
+        let room = 0
+        const roomMatch = addr.match(/(?:호실\s*)?(\d+)호/)
+        if (roomMatch) {
+          room = parseInt(roomMatch[1])
+        }
+        return { building, floor, room }
+      }
+
+      // 정렬 (새로운 기준: 건물 → 층 → 호실 → 거래처명)
+      remainingRows.sort((a, b) => {
+        const addrA = parseAddress(a[1] || '')
+        const addrB = parseAddress(b[1] || '')
+
+        // 1. 건물명으로 정렬
+        if (!addrA.building && addrB.building) return 1
+        if (addrA.building && !addrB.building) return -1
+        const buildingCompare = addrA.building.localeCompare(addrB.building, 'ko-KR')
+        if (buildingCompare !== 0) return buildingCompare
+
+        // 2. 층으로 정렬 (지하는 음수로 처리되어 있음)
+        if (addrA.floor !== addrB.floor) return addrA.floor - addrB.floor
+
+        // 3. 호실로 정렬
+        if (addrA.room !== addrB.room) return addrA.room - addrB.room
+
+        // 4. 거래처명으로 정렬
+        const companyA = (a[0] || '').toString().trim()
+        const companyB = (b[0] || '').toString().trim()
+        if (!companyA && companyB) return 1
+        if (companyA && !companyB) return -1
+        return companyA.localeCompare(companyB, 'ko-KR')
+      })
+
+      // 정렬된 데이터를 추가하면서 건물/거래처별 구분선 삽입
+      let prevCompany = ''
+      let prevBuilding = ''
+      let currentRowIndex = 4
+
+      for (let i = 0; i < remainingRows.length; i++) {
+        const row = remainingRows[i]
+        const currentCompany = (row[0] || '').toString().trim()
+        const address = (row[1] || '').toString()
+        const currentBuilding = parseAddress(address).building
+
+        // 1. 건물이 바뀌면 회색 빈 행 삽입
+        if (i > 0 && prevBuilding !== currentBuilding && prevBuilding !== '') {
+          const emptyRow = new Array(row.length).fill('')
+          newData.push(emptyRow)
+          newRowColors[currentRowIndex] = '#d1d5db' // 회색 배경
+          currentRowIndex++
+        }
+        // 2. 같은 건물 내에서 거래처명이 바뀌면 흰색 빈 행 삽입
+        else if (i > 0 && prevBuilding === currentBuilding && prevCompany !== currentCompany && prevCompany !== '') {
+          const emptyRow = new Array(row.length).fill('')
+          newData.push(emptyRow)
+          // 흰색 배경은 기본이므로 별도 설정 불필요
+          currentRowIndex++
+        }
+
+        newData.push(row)
+        // 기존 색상 복원
+        if (remainingRowTextColors[i]) {
+          newRowTextColors[currentRowIndex] = remainingRowTextColors[i]
+        }
+        if (remainingRowColors[i]) {
+          newRowColors[currentRowIndex] = remainingRowColors[i]
+        }
+        currentRowIndex++
+        prevCompany = currentCompany
+        prevBuilding = currentBuilding
+      }
+
+      // 업데이트된 데이터로 시트 갱신
+      updatedSheets[selectedSheet] = {
+        ...updatedSheets[selectedSheet],
+        data: newData
+      }
+      setSheets(updatedSheets)
+      setCheckedRows({})
+      setRowColors(newRowColors)
+      setRowTextColors(newRowTextColors)
+
+      // 정렬 후 중복 상품 다시 감지
+      setTimeout(() => {
+        const productMap: {[key: string]: number[]} = {}
+        for (let i = 4; i < newData.length; i++) {
+          const row = newData[i]
+
+          // 행이 완전히 비어있는지 확인 (A, B, F열 중 하나라도 값이 있어야 유효한 행)
+          const hasCompanyName = row[0] && row[0] !== '' // A열 (회사명)
+          const hasAddress = row[1] && row[1] !== '' // B열 (주소)
+          const hasProductName = row[5] && row[5] !== '' // F열 (상품명)
+          const isValidRow = hasCompanyName || hasAddress || hasProductName
+
+          const productCode = row[4] // E열 (상품코드)
+
+          // 유효한 행이고 상품코드가 있는 경우만 중복 체크
+          if (isValidRow && productCode && productCode !== '') {
+            if (!productMap[productCode]) {
+              productMap[productCode] = []
+            }
+            productMap[productCode].push(i)
+          }
+        }
+
+        const duplicates: {[key: number]: string} = {}
+        Object.keys(productMap).forEach(code => {
+          if (productMap[code].length > 1) {
+            productMap[code].forEach(rowIdx => {
+              duplicates[rowIdx] = code
+            })
+          }
+        })
+        setDuplicateProducts(duplicates)
+      }, 100)
+
+    } catch (error: any) {
+      console.error('Order save error:', error)
+      toast.error(`발주 저장 실패: ${error.message}`, { id: loadingToast })
+    }
+  }
+
+  // 주소 파싱 헬퍼 함수 (SORTING_RULES.md 기준)
+  const parseAddress = (address: any): { building: string; floor: number; room: number } => {
+    if (!address) return { building: '', floor: 0, room: 0 }
+
+    const addr = String(address).trim()
+
+    // 건물명 추출
+    const buildingMatch = addr.match(/^([가-힣a-zA-Z\s]+?)(?=\s*(?:지하|B\s*\d|\d+층|$))/)
+    const building = buildingMatch ? buildingMatch[1].trim() : addr
+
+    // 층수 추출
+    let floor = 0
+    const basementMatch = addr.match(/(?:지하|B)\s*(\d+)/)
+    if (basementMatch) {
+      floor = -parseInt(basementMatch[1])
+    } else {
+      const floorMatch = addr.match(/(?:F\s*)?(\d+)(?:층|F)/)
+      if (floorMatch) {
+        floor = parseInt(floorMatch[1])
+      }
+    }
+
+    // 호실 추출
+    let room = 0
+    const roomMatch = addr.match(/(?:호실\s*)?(\d+)호/)
+    if (roomMatch) {
+      room = parseInt(roomMatch[1])
+    }
+
+    return { building, floor, room }
+  }
+
+  // 데이터 정렬 함수 (SORTING_RULES.md 기준) - 필요한 시점에만 호출
+  const sortSheetData = (sheetIndex: number) => {
+    const sheet = sheets[sheetIndex]
+    if (!sheet?.data || sheet.data.length <= 4) return
+
+    const headers = sheet.data.slice(0, 4)
+    const dataRows = sheet.data.slice(4)
+
+    // 4단계 정렬: 건물명 → 층수 → 호실 → 거래처명
+    const sortedRows = [...dataRows].sort((a, b) => {
+      const addressA = parseAddress(a[1])
+      const addressB = parseAddress(b[1])
+
+      // 1차: 건물명 비교
+      if (!addressA.building && addressB.building) return 1
+      if (addressA.building && !addressB.building) return -1
+      const buildingCompare = addressA.building.localeCompare(addressB.building, 'ko-KR')
+      if (buildingCompare !== 0) return buildingCompare
+
+      // 2차: 층수 비교
+      if (addressA.floor !== addressB.floor) {
+        return addressA.floor - addressB.floor
+      }
+
+      // 3차: 호실 비교
+      if (addressA.room !== addressB.room) {
+        return addressA.room - addressB.room
+      }
+
+      // 4차: 거래처명 비교
+      const companyA = (a[0] || '').toString().trim()
+      const companyB = (b[0] || '').toString().trim()
+      if (!companyA && companyB) return 1
+      if (companyA && !companyB) return -1
+      return companyA.localeCompare(companyB, 'ko-KR')
+    })
+
+    // 정렬된 데이터로 시트 업데이트
+    const newSheets = [...sheets]
+    newSheets[sheetIndex] = {
+      ...sheet,
+      data: [...headers, ...sortedRows]
+    }
+    setSheets(newSheets)
+  }
+
+  // 체크된 행을 제거한 데이터 반환 (정렬하지 않음)
+  const getFilteredData = () => {
+    if (!sheets[selectedSheet]?.data) return []
+
+    const data = sheets[selectedSheet].data
+    const headers: any[][] = []
+    const uncheckedRows: any[][] = []
+
+    // 헤더 행들(0-3)은 그대로 포함
+    for (let i = 0; i < 4 && i < data.length; i++) {
+      headers.push([...data[i]])
+    }
+
+    // 데이터 행들(4부터)은 체크되지 않은 것만 포함
+    for (let i = 4; i < data.length; i++) {
+      if (!checkedRows[i]) {
+        uncheckedRows.push([...data[i]])
+      }
+    }
+
+    return [...headers, ...uncheckedRows]
+  }
+
+  // 저장하기 버튼 클릭 핸들러
+  const handleSaveToFile = () => {
+    setShowSaveModal(true)
+    setSaveFileName('')
+  }
+
+  // 웹 저장 핸들러
+  const handleSaveToWeb = async () => {
+    if (!saveFileName.trim()) {
+      toast.error('파일명을 입력해주세요')
+      return
+    }
+
+    const loadingToast = toast.loading('웹에 저장 중...')
+    try {
+      const filteredData = getFilteredData()
+      const today = new Date().toISOString().split('T')[0]
+
+      // Daily order 저장 API 호출
+      await excelAPI.saveDailyOrder({
+        date: today,
+        order_type: 'order',
+        sheet_name: saveFileName,
+        data: filteredData,
+        columns: sheets[selectedSheet].columns,
+        notes: `체크된 항목 제거됨 (총 ${Object.keys(checkedRows).filter(k => checkedRows[parseInt(k)]).length}개 항목 제외)`
+      })
+
+      toast.success('웹에 저장되었습니다', { id: loadingToast })
+      setShowSaveModal(false)
+      setSaveFileName('')
+      // 저장 완료 시 백업 삭제 (되돌리기 불가능하게)
+      setBackupBeforeDelete(null)
+    } catch (error: any) {
+      console.error('Save to web error:', error)
+      toast.error(error.message || '웹 저장에 실패했습니다', { id: loadingToast })
+    }
+  }
+
+  // 엑셀 다운로드 핸들러
+  const handleDownloadExcel = async () => {
+    if (!saveFileName.trim()) {
+      toast.error('파일명을 입력해주세요')
+      return
+    }
+
+    const loadingToast = toast.loading('엑셀 파일 생성 중...')
+    try {
+      const filteredData = getFilteredData()
+
+      // Excel export API 호출
+      const response = await excelAPI.exportExcel({
+        data: filteredData,
+        file_name: saveFileName,
+        sheet_name: sheets[selectedSheet].sheet_name
+      })
+
+      // Blob 생성 및 다운로드
+      const blob = new Blob([response], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      })
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${saveFileName}.xlsx`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+
+      toast.success('엑셀 파일이 다운로드되었습니다', { id: loadingToast })
+      setShowSaveModal(false)
+      setSaveFileName('')
+      // 저장 완료 시 백업 삭제 (되돌리기 불가능하게)
+      setBackupBeforeDelete(null)
+    } catch (error: any) {
+      console.error('Excel download error:', error)
+      toast.error(error.message || '엑셀 다운로드에 실패했습니다', { id: loadingToast })
+    }
+  }
+
+  // 작업 이탈 방지 관련 state
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false)
+  const [pendingNavigation, setPendingNavigation] = useState<string | null>(null)
+  const isNavigatingRef = useRef(false)
+  const initialLoadRef = useRef(true)
+
+  // 작업 상태가 변경될 때마다 hasUnsavedChanges 업데이트
+  useEffect(() => {
+    // 초기 로드 시에는 unsaved로 표시하지 않음
+    if (initialLoadRef.current) {
+      initialLoadRef.current = false
+      return
+    }
+
+    // 시트 데이터가 있으면 작업 중으로 간주
+    if (sheets.length > 0) {
+      setHasUnsavedChanges(true)
+    }
+  }, [sheets, rowColors, rowTextColors, duplicateProducts, isOrderReceiptUploaded])
+
+  // 브라우저 이탈 방지 (beforeunload)
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasUnsavedChanges && !isNavigatingRef.current) {
+        e.preventDefault()
+        e.returnValue = '' // Chrome requires returnValue to be set
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [hasUnsavedChanges])
+
+  // 중간 저장 함수
+  const saveDraft = useCallback(async () => {
+    try {
+      await workDraftAPI.saveDraft({
+        draft_type: 'spreadsheet',
+        sheets_data: sheets,
+        selected_sheet: selectedSheet,
+        row_colors: rowColors,
+        row_text_colors: rowTextColors,
+        duplicate_products: duplicateProducts,
+        is_order_receipt_uploaded: isOrderReceiptUploaded,
+        is_receipt_slip_uploaded: isReceiptSlipUploaded,
+        checked_rows: checkedRows,
+        description: '작업 중간 저장',
+        session_id: Date.now().toString()
+      })
+
+      toast.success('작업이 중간 저장되었습니다')
+      setHasUnsavedChanges(false)
+      return true
+    } catch (error) {
+      console.error('Error saving draft:', error)
+      toast.error('중간 저장 중 오류가 발생했습니다')
+      return false
+    }
+  }, [sheets, selectedSheet, rowColors, rowTextColors, duplicateProducts, isOrderReceiptUploaded, isReceiptSlipUploaded, checkedRows])
+
+  // 임시 저장 데이터 불러오기
+  const loadDraft = useCallback(async () => {
+    try {
+      const response = await workDraftAPI.loadDraft('spreadsheet')
+
+      if (response.has_draft && response.draft) {
+        const draft = response.draft
+        setSheets(draft.sheets_data || [])
+        setSelectedSheet(draft.selected_sheet || 0)
+        setRowColors(draft.row_colors || {})
+        setRowTextColors(draft.row_text_colors || {})
+        setDuplicateProducts(draft.duplicate_products || {})
+        setIsOrderReceiptUploaded(draft.is_order_receipt_uploaded || false)
+        setIsReceiptSlipUploaded(draft.is_receipt_slip_uploaded || false)
+        setCheckedRows(draft.checked_rows || {})
+
+        toast.success('임시 저장된 작업을 불러왔습니다')
+        return true
+      }
+      return false
+    } catch (error) {
+      console.error('Error loading draft:', error)
+      return false
+    }
+  }, [])
+
+  // 중간 저장 모달 핸들러
+  const handleSaveDraftAndNavigate = async () => {
+    const success = await saveDraft()
+    if (success) {
+      setShowUnsavedModal(false)
+      if (pendingNavigation) {
+        isNavigatingRef.current = true
+        navigate(pendingNavigation)
+      }
+    }
+  }
+
+  const handleContinueEditing = () => {
+    setShowUnsavedModal(false)
+    setPendingNavigation(null)
+  }
+
+  const handleDiscardChanges = async () => {
+    try {
+      await workDraftAPI.deleteDraft('spreadsheet')
+      setHasUnsavedChanges(false)
+      setShowUnsavedModal(false)
+
+      if (pendingNavigation) {
+        isNavigatingRef.current = true
+        navigate(pendingNavigation)
+      } else {
+        // 페이지 새로고침 또는 닫기
+        window.location.reload()
+      }
+    } catch (error) {
+      console.error('Error deleting draft:', error)
+    }
+  }
+
+  useEffect(() => {
+    // Check if token exists - use correct key 'auth-token'
+    const token = localStorage.getItem('auth-token')
+    if (!token) {
+      navigate('/login')
+      return
+    }
+    // checkForWorkInProgress() // 비활성화 - 나중에 다시 개발
+    setLoading(false) // 로딩 종료
+    checkForDraft() // 임시 저장된 데이터 확인
+  }, [navigate])
+
+  // 임시 저장된 데이터 확인
+  const checkForDraft = async () => {
+    try {
+      const response = await workDraftAPI.loadDraft('spreadsheet')
+      if (response.has_draft) {
+        const shouldLoad = window.confirm(
+          `${response.draft.updated_at}에 저장된 작업이 있습니다.\n불러오시겠습니까?`
+        )
+        if (shouldLoad) {
+          await loadDraft()
+        }
+      }
+    } catch (error) {
+      console.error('Error checking for draft:', error)
+    }
+  }
+
+  // 비활성화 - 나중에 다시 개발
+  // const checkForWorkInProgress = async () => {
+  //   setLoading(true)
+  //   try {
+  //     // Check if there's a file in the backend
+  //     const response = await excelAPI.checkExistingFile()
+
+  //     if (response && response.has_file) {
+  //       setWorkInProgressFile(response.filename || '작업 중인 파일')
+  //       setShowWorkInProgressDialog(true)
+  //       setLoading(false) // Stop loading after showing dialog
+  //     } else {
+  //       // No file exists, just finish loading
+  //       setLoading(false)
+  //     }
+  //   } catch (error: any) {
+  //     console.error('Error checking for existing file:', error)
+
+  //     // If 401 error, redirect to login
+  //     if (error?.response?.status === 401) {
+  //       localStorage.removeItem('auth-token')
+  //       localStorage.removeItem('auth-username')
+  //       navigate('/login')
+  //       return
+  //     }
+
+  //     // For any other error, just stop loading
+  //     setLoading(false)
+  //   }
+  // }
+
+  // Commented out - Work in Progress dialog disabled
+  // const handleContinueWork = async (shouldContinue: boolean) => {
+  //   setShowWorkInProgressDialog(false)
+  //   if (shouldContinue) {
+  //     await loadExcelData()
+  //   } else {
+  //     setLoading(false)
+  //   }
+  // }
+
+  const handleContinueWork = () => {
+    // Disabled - no longer showing work in progress dialog
+  }
+
+  const loadExcelData = async () => {
+    console.log('Starting to load Excel data...')
+    setLoading(true)
+    try {
+      const response = await excelAPI.loadExcel()
+      console.log('Excel API Response:', response)  // 디버깅용
+
+      if (response && response.success && response.sheets && response.sheets.length > 0) {
+        console.log('Sheets loaded:', response.sheets.length)  // 디버깅용
+        console.log('First sheet:', response.sheets[0])  // 디버깅용
+        console.log('First sheet data sample:', response.sheets[0].data?.slice(0, 5))  // 데이터 샘플 확인
+
+        // Log actual data values to verify
+        if (response.sheets[0].data && response.sheets[0].data.length > 0) {
+          console.log('Data validation - First 5 rows:')
+          for (let i = 0; i < Math.min(5, response.sheets[0].data.length); i++) {
+            console.log(`Row ${i}:`, response.sheets[0].data[i])
+          }
+        }
+
+        // Ensure data is properly set
+        const processedSheets = response.sheets.map((sheet: SheetData) => ({
+          ...sheet,
+          data: sheet.data || [],
+          columns: sheet.columns || []
+        }))
+
+        setSheets(processedSheets)
+        setSelectedSheet(0)
+
+        // 엑셀 로드 후 첫 번째 시트 정렬
+        if (processedSheets.length > 0 && processedSheets[0].data.length > 4) {
+          // 정렬 함수는 sheets state 업데이트 후 별도로 호출해야 함
+          setTimeout(() => {
+            sortSheetData(0)
+          }, 0)
+        }
+
+        // 작업 상태 복원 (업로드 플래그, 색상, 체크박스, 중복 정보)
+        if (response.work_state) {
+          console.log('Restoring work state:', response.work_state)
+
+          // 업로드 상태 복원
+          if (response.work_state.is_order_receipt_uploaded !== undefined) {
+            setIsOrderReceiptUploaded(response.work_state.is_order_receipt_uploaded)
+          }
+          if (response.work_state.is_receipt_slip_uploaded !== undefined) {
+            setIsReceiptSlipUploaded(response.work_state.is_receipt_slip_uploaded)
+          }
+
+          // 행 색상 복원
+          if (response.work_state.row_colors) {
+            setRowColors(response.work_state.row_colors)
+          }
+          if (response.work_state.row_text_colors) {
+            setRowTextColors(response.work_state.row_text_colors)
+          }
+
+          // 체크박스 상태 복원
+          if (response.work_state.checked_rows) {
+            setCheckedRows(response.work_state.checked_rows)
+          }
+
+          // 중복 상품 정보 복원
+          if (response.work_state.duplicate_products) {
+            setDuplicateProducts(response.work_state.duplicate_products)
+          }
+
+          toast.success(`작업 상태가 복원되었습니다. (${response.sheets.length}개 시트)`)
+        } else {
+          toast.success(`${response.sheets.length}개의 시트를 불러왔습니다.`)
+        }
+
+        setLoading(false)  // Explicitly set loading to false
+      } else {
+        console.error('No sheets found in response:', response)
+        setLoading(false)
+        toast.error('시트 데이터가 없습니다.')
+      }
+    } catch (error: any) {
+      console.error('Error loading Excel - Full error:', error)
+      console.error('Error message:', error?.message)
+      console.error('Error response:', error?.response)
+      setLoading(false)  // Make sure to set loading to false on error
+      toast.error(`엑셀 데이터를 불러오는데 실패했습니다: ${error?.message || 'Unknown error'}`)
+    }
+  }
+
+  const handleLogout = () => {
+    // 작업 중인 내용이 있으면 모달 표시
+    if (hasUnsavedChanges) {
+      setPendingNavigation('/login')
+      setShowUnsavedModal(true)
+    } else {
+      // 작업 중인 내용이 없으면 바로 로그아웃
+      clearAuth()
+      toast.success('로그아웃 되었습니다.')
+      navigate('/login')
+    }
+  }
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const loadingToast = toast.loading('파일 업로드 중...')
+
+    try {
+      const response = await excelAPI.uploadExcel(file)
+      if (response.success && response.sheets) {
+        // Transform backend sheets to frontend SheetData format
+        const transformedSheets = response.sheets.map((sheet: any) => ({
+          sheet_name: sheet.name || '시트',
+          sheet_type: '편집용',
+          data: sheet.data || [],
+          columns: sheet.data && sheet.data.length > 1 ? sheet.data[1] : [],
+          rows: sheet.data ? sheet.data.length : 0,
+          cols: sheet.data && sheet.data[0] ? sheet.data[0].length : 0,
+          file_path: response.filename || file.name,
+          loaded_at: new Date().toISOString()
+        }))
+
+        setSheets(transformedSheets)
+        setSelectedSheet(0)
+
+        // 파일 업로드 후 첫 번째 시트 정렬
+        if (transformedSheets.length > 0 && transformedSheets[0].data.length > 4) {
+          setTimeout(() => {
+            sortSheetData(0)
+          }, 0)
+        }
+
+        // Store the filename for display
+        if (response.filename) {
+          localStorage.setItem('current_filename', response.filename)
+        }
+
+        toast.success(`파일이 성공적으로 업로드되었습니다. (${transformedSheets.length}개 시트)`, { id: loadingToast })
+      }
+    } catch (error: any) {
+      console.error('Upload error:', error)
+      toast.error('파일 업로드에 실패했습니다.', { id: loadingToast })
+    }
+  }
+
+  const handleOrderReceiptUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const currentSheetData = sheets[selectedSheet]?.data
+
+    // 현재 로드된 주문서 데이터가 없으면 에러
+    if (!currentSheetData || currentSheetData.length === 0) {
+      toast.error('먼저 주문서를 업로드해주세요.')
+      return
+    }
+
+    const loadingToast = toast.loading('주문 입고 파일 검증 중...')
+
+    try {
+      const response = await excelAPI.uploadOrderReceipt(file)
+
+      if (response.success) {
+        const receiptData = response.data
+
+        // 데이터 검증 및 병합
+        const validationResult = validateAndMergeData(currentSheetData, receiptData)
+
+        if (validationResult.success) {
+          const updatedSheets = [...sheets]
+          updatedSheets[selectedSheet] = { ...sheets[selectedSheet], data: validationResult.mergedData }
+          setSheets(updatedSheets)
+          setIsOrderReceiptUploaded(true)
+
+          // K열(교환) 값이 있는 행을 빨간색으로 표시
+          if (validationResult.exchangeRows) {
+            setRowTextColors(prev => ({ ...prev, ...validationResult.exchangeRows }))
+          }
+
+          toast.success(`${validationResult.matchedCount}개 행의 데이터가 성공적으로 병합되었습니다.`, { id: loadingToast })
+        } else {
+          toast.error(validationResult.message || '데이터 검증에 실패했습니다.', { id: loadingToast })
+        }
+      } else {
+        const errorMessage = typeof response === 'object' && response?.message
+          ? response.message
+          : typeof response === 'object' && response?.detail
+          ? response.detail
+          : '주문 입고 파일 처리에 실패했습니다.'
+        toast.error(errorMessage, { id: loadingToast })
+      }
+    } catch (error: any) {
+      console.error('Order receipt upload error:', error)
+      const errorMessage = error?.response?.data?.detail || error?.message || '주문 입고 파일 업로드에 실패했습니다.'
+      toast.error(errorMessage, { id: loadingToast })
+    }
+
+    // 파일 입력 초기화
+    event.target.value = ''
+  }
+
+  // 데이터 검증 및 병합 함수
+  const validateAndMergeData = (originalData: any[][], receiptData: any[][]): any => {
+    const mergedData = originalData.map(row => [...row])
+    let matchedCount = 0
+    const unmatchedRows: string[] = []
+
+    // 5행부터 검증 및 병합 (index 4부터)
+    for (let i = 4; i < originalData.length; i++) {
+      // 원본 데이터
+      const originalStore = originalData[i]?.[0] // A열: 거래처명
+      const originalProduct = originalData[i]?.[4] // E열: 공급처상품명
+      const originalQty = originalData[i]?.[8] // I열: 발주수량
+
+      // 원본에 데이터가 없으면 스킵
+      if (!originalStore && !originalProduct && !originalQty) {
+        continue
+      }
+
+      // 입고 파일에서 매칭되는 행 찾기
+      let matched = false
+      for (let j = 4; j < receiptData.length; j++) {
+        const receiptStore = receiptData[j]?.[0] // A열: 거래처명
+        const receiptProduct = receiptData[j]?.[4] // E열: 공급처상품명
+        const receiptQty = receiptData[j]?.[8] // I열: 발주수량
+
+        // 문자열 정규화 함수
+        const normalize = (str: any) => {
+          if (!str) return ''
+          return String(str).trim().toLowerCase().replace(/\s+/g, '')
+        }
+
+        // 숫자 비교 함수
+        const compareNumbers = (a: any, b: any) => {
+          const numA = typeof a === 'number' ? a : parseFloat(String(a).replace(/,/g, ''))
+          const numB = typeof b === 'number' ? b : parseFloat(String(b).replace(/,/g, ''))
+          return !isNaN(numA) && !isNaN(numB) && Math.abs(numA - numB) < 0.01
+        }
+
+        // 매칭 로직:
+        // 1. 입고 파일의 I열이 있으면: A, E, I 모두 일치
+        // 2. 입고 파일의 I열이 없으면: A, E만 일치
+        const isMatched = normalize(originalStore) === normalize(receiptStore) &&
+                         normalize(originalProduct) === normalize(receiptProduct) &&
+                         (receiptQty === null || receiptQty === undefined || receiptQty === '' ||
+                          isNaN(parseFloat(String(receiptQty).replace(/,/g, ''))) ||
+                          compareNumbers(originalQty, receiptQty))
+
+        if (isMatched) {
+
+          matched = true
+          matchedCount++
+
+          // 입고 파일에서 데이터 병합
+          // J열: 입고 파일의 J열 (미송) -> 주문서 J열로
+          mergedData[i][9] = receiptData[j][9]   // J열: 미송
+
+          // K열: 입고 파일의 K열 (교환) -> 주문서 K열로
+          mergedData[i][10] = receiptData[j][10] // K열: 교환
+
+          // L열: 입고 파일의 L열 (장끼) -> 주문서 L열로
+          mergedData[i][11] = receiptData[j][11] // L열: 장끼
+
+          // M열: 입고 파일의 M열 -> 주문서 M열로
+          mergedData[i][12] = receiptData[j][12] // M열
+
+          // N열: 입고 파일의 N열 -> 주문서 N열로
+          mergedData[i][13] = receiptData[j][13] // N열
+
+          // Q열: 입고 파일의 Q열 (삼촌 코멘트) -> 주문서 Q열로
+          mergedData[i][16] = receiptData[j][16] // Q열: 삼촌 코멘트
+
+          break
+        }
+      }
+
+      if (!matched && originalStore) {
+        unmatchedRows.push(`${i+1}행: ${originalStore} - ${originalProduct || ''} (수량: ${originalQty || 0})`)
+      }
+    }
+
+    // T열 계산 (index 19): H열 * L열
+    for (let i = 4; i < mergedData.length; i++) {
+      const hValue = parseFloat(mergedData[i][7]) || 0  // H열: 단가
+      const lValue = parseFloat(mergedData[i][11]) || 0 // L열: 장끼
+
+      // T열 = H열 * L열
+      mergedData[i][19] = hValue * lValue
+    }
+
+    // 노란색 3번 행(index 2)의 합계 재계산
+    const sumColumns = [8, 9, 10, 11, 12, 13, 14, 18, 19, 20]  // I,J,K,L,M,N,O,S,T,U
+    if (mergedData.length > 3) {
+      sumColumns.forEach(colIdx => {
+        let total = 0
+        for (let rowIdx = 4; rowIdx < mergedData.length; rowIdx++) {
+          const cellValue = mergedData[rowIdx][colIdx]
+          if (cellValue != null) {
+            try {
+              total += parseFloat(cellValue)
+            } catch (e) {
+              // Skip non-numeric values
+            }
+          }
+        }
+        mergedData[2][colIdx] = total
+      })
+    }
+
+    // K열(교환) 값이 있으면 해당 행을 빨간색으로 표시
+    const exchangeRows: {[key: number]: string} = {}
+    for (let i = 4; i < mergedData.length; i++) {
+      const kValue = mergedData[i][10] // K열: 교환
+      if (kValue && parseFloat(kValue) > 0) {
+        exchangeRows[i] = 'red' // 교환 건이 있으면 빨간색
+      }
+    }
+
+    if (unmatchedRows.length > 0 && matchedCount === 0) {
+      return {
+        success: false,
+        message: `일치하는 데이터를 찾을 수 없습니다. 거래처명, 공급처상품명, 발주수량이 일치하는지 확인해주세요.`,
+        unmatchedRows
+      }
+    }
+
+    return {
+      success: true,
+      mergedData,
+      matchedCount,
+      unmatchedRows,
+      exchangeRows
+    }
+  }
+
+  // 입고전표 업로드 후 자동 체크 로직
+  const autoCheckCompletedRows = (data: any[][], textColors: {[key: number]: string}) => {
+    const newCheckedRows: {[key: number]: boolean} = {}
+
+    // 1단계: 빨간 글자(오류) 행의 상품코드 수집
+    const errorProductCodes = new Set<string>()
+    for (let i = 4; i < data.length; i++) {
+      const isRedText = textColors[i] === '#dc3545' || textColors[i] === 'red'
+      if (isRedText) {
+        const productCode = data[i][4] ? String(data[i][4]).trim() : '' // E열: 상품코드
+        if (productCode) {
+          errorProductCodes.add(productCode)
+          console.log(`오류 상품코드 수집: ${productCode} (행 ${i+1})`)
+        }
+      }
+    }
+
+    console.log(`총 오류 상품코드 개수: ${errorProductCodes.size}`, Array.from(errorProductCodes))
+
+    // 2단계: 5행부터 검사 (index 4부터)
+    for (let i = 4; i < data.length; i++) {
+      const productCode = data[i][4] ? String(data[i][4]).trim() : '' // E열: 상품코드
+
+      // 오류가 있는 상품코드와 동일하면 체크하지 않음
+      if (errorProductCodes.has(productCode)) {
+        continue
+      }
+
+      const iValue = parseFloat(data[i][8]) || 0  // I열: 신규주문
+      const lValue = parseFloat(data[i][11]) || 0 // L열: 장끼
+      const oValue = parseFloat(data[i][14]) || 0 // O열: 입고
+
+      // I열, L열, O열 값이 모두 동일하면 체크
+      if (iValue > 0 && iValue === lValue && lValue === oValue) {
+        newCheckedRows[i] = true
+      }
+    }
+
+    return newCheckedRows
+  }
+
+  const handleReceiptSlipUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!isOrderReceiptUploaded) {
+      toast.error('먼저 주문 입고 파일을 업로드해주세요.')
+      return
+    }
+
+    const loadingToast = toast.loading('입고전표 파일 처리 중...')
+
+    try {
+      const response = await excelAPI.uploadReceiptSlip(file)
+
+      if (response.success) {
+        const receiptSlipData = response.data
+
+        // 현재 시트 데이터 가져오기
+        const currentSheetData = sheets[selectedSheet]?.data
+        if (!currentSheetData) {
+          toast.error('주문서 데이터를 찾을 수 없습니다.', { id: loadingToast })
+          return
+        }
+
+        // 입고전표 데이터 매칭 및 O열 업데이트
+        const updatedData = matchReceiptSlipData(currentSheetData, receiptSlipData)
+
+        if (updatedData.success) {
+          setIsReceiptSlipUploaded(true)
+
+          // L값과 O값 비교 및 색상 설정 (데이터도 함께 업데이트)
+          const { finalData, colors, textColors, duplicates } = calculateRowColorsAndDifferences(
+            updatedData.mergedData,
+            updatedData.unmatchedRowIndices || []  // 매칭 실패한 행 인덱스 전달
+          )
+
+          // 노란색 3번 행(index 2)의 합계 재계산
+          const sumColumns = [8, 9, 10, 11, 12, 13, 14, 18, 19, 20]  // I,J,K,L,M,N,O,S,T,U
+          if (finalData.length > 3) {
+            sumColumns.forEach(colIdx => {
+              let total = 0
+              for (let rowIdx = 4; rowIdx < finalData.length; rowIdx++) {
+                const cellValue = finalData[rowIdx][colIdx]
+                if (cellValue != null) {
+                  try {
+                    total += parseFloat(cellValue)
+                  } catch (e) {
+                    // Skip non-numeric values
+                  }
+                }
+              }
+              finalData[2][colIdx] = total
+            })
+          }
+
+          // 상품코드(E열) 기준으로 데이터 정렬
+          const sortedData = sortByProductCode(finalData, colors, textColors, duplicates)
+
+          // I열, L열, O열 값이 모두 동일한 행 자동 체크 (오류 상품코드 제외)
+          const autoChecked = autoCheckCompletedRows(sortedData.data, sortedData.textColors)
+
+          // 최종 데이터와 색상 한 번에 설정 - React 배치 업데이트 사용
+          const updatedSheets = [...sheets]
+          updatedSheets[selectedSheet] = { ...sheets[selectedSheet], data: sortedData.data }
+
+          // 모든 상태를 한 번에 업데이트 (React 18의 자동 배치 활용)
+          setSheets(updatedSheets)
+          setRowColors(sortedData.colors)
+          setRowTextColors(sortedData.textColors)
+          setDuplicateProducts(sortedData.duplicates)
+          setCheckedRows(autoChecked)
+
+          const checkedCount = Object.keys(autoChecked).length
+          toast.success(`${updatedData.matchedCount}개 행의 입고량이 업데이트되었습니다. ${checkedCount}개 행이 자동 체크되었습니다.`, { id: loadingToast })
+        } else {
+          toast.error(updatedData.message || '데이터 매칭에 실패했습니다.', { id: loadingToast })
+        }
+      } else {
+        const errorMessage = typeof response === 'object' && response?.message
+          ? response.message
+          : typeof response === 'object' && response?.detail
+          ? response.detail
+          : '입고전표 처리에 실패했습니다.'
+        toast.error(errorMessage, { id: loadingToast })
+      }
+    } catch (error: any) {
+      console.error('Receipt slip upload error:', error)
+      const errorMessage = error?.response?.data?.detail || error?.message || '입고전표 업로드에 실패했습니다.'
+      toast.error(errorMessage, { id: loadingToast })
+    }
+
+    // 파일 입력 초기화
+    event.target.value = ''
+  }
+
+  // 입고전표 데이터 매칭 함수
+  const matchReceiptSlipData = (originalData: any[][], receiptSlipData: any[][]): any => {
+    const mergedData = originalData.map(row => [...row])
+    let matchedCount = 0
+    const unmatchedRows: string[] = []
+    const unmatchedRowIndices: number[] = []  // NEW: 매칭 실패한 행 인덱스 추적
+
+    // 5행부터 매칭 시작 (index 4부터)
+    for (let i = 4; i < originalData.length; i++) {
+      // 주문서 데이터
+      const orderStore = originalData[i]?.[0] // A열: 거래처명
+      const orderProductCode = originalData[i]?.[4] // E열: 상품코드 (예: S16609, S16821)
+
+      // 데이터가 없으면 스킵
+      if (!orderStore && !orderProductCode) {
+        continue
+      }
+
+      // 입고전표에서 매칭되는 행 찾기 (헤더를 제외하고 2행부터 시작, index 1부터)
+      let matched = false
+      for (let j = 1; j < receiptSlipData.length; j++) {
+        const slipStore = receiptSlipData[j]?.[0] // A열: 공급처 (거래처명)
+        const slipProductCode = receiptSlipData[j]?.[8] // I열: 상품코드
+        const slipQuantity = receiptSlipData[j]?.[14] // O열: 수량 (입고량)
+
+        // 문자열 정규화 함수
+        const normalize = (str: any) => {
+          if (!str) return ''
+          return String(str).trim().toLowerCase().replace(/\s+/g, '')
+        }
+
+        // 상품코드(E열) <-> 상품코드(I열) 매칭
+        const isMatched = normalize(orderProductCode) === normalize(slipProductCode)
+
+        if (isMatched) {
+          matched = true
+          matchedCount++
+
+          // O열에 입고량 기록 (index 14)
+          mergedData[i][14] = slipQuantity || 0
+
+          break
+        }
+      }
+
+      if (!matched && orderStore) {
+        unmatchedRows.push(`${i+1}행: ${orderStore} - ${orderProductCode || ''}`)
+        unmatchedRowIndices.push(i)  // NEW: 인덱스 저장
+      }
+    }
+
+    if (matchedCount === 0) {
+      return {
+        success: false,
+        message: `매칭되는 데이터를 찾을 수 없습니다.`,
+        unmatchedRows,
+        unmatchedRowIndices  // NEW
+      }
+    }
+
+    return {
+      success: true,
+      mergedData,
+      matchedCount,
+      unmatchedRows,
+      unmatchedRowIndices  // NEW
+    }
+  }
+
+  // 거래처 내에서 같은 상품코드끼리 그룹화
+  const sortByProductCode = (
+    data: any[][],
+    colors: {[key: number]: string},
+    textColors: {[key: number]: string},
+    duplicates: {[key: number]: string}
+  ) => {
+    // 처음 4행(헤더, 합계, 구분선)은 그대로 유지
+    const headerRows = data.slice(0, 4)
+    const dataRows = data.slice(4)
+
+    // 거래처별로 그룹화
+    const result: any[][] = []
+    let currentStoreRows: any[][] = []
+    let currentStoreName = ''
+
+    dataRows.forEach((row, idx) => {
+      const storeName = row[0]
+
+      // 빈 행 (구분선)인 경우
+      if (!storeName || storeName === '') {
+        // 이전 거래처의 행들을 정렬해서 추가
+        if (currentStoreRows.length > 0) {
+          const sortedStoreRows = sortStoreRows(currentStoreRows)
+          result.push(...sortedStoreRows)
+          currentStoreRows = []
+        }
+        // 빈 행 추가
+        result.push(row)
+        currentStoreName = ''
+      } else {
+        // 새로운 거래처가 시작되면
+        if (currentStoreName !== storeName) {
+          // 이전 거래처의 행들을 정렬해서 추가
+          if (currentStoreRows.length > 0) {
+            const sortedStoreRows = sortStoreRows(currentStoreRows)
+            result.push(...sortedStoreRows)
+            currentStoreRows = []
+          }
+          currentStoreName = storeName
+        }
+        // 현재 거래처 행 추가
+        currentStoreRows.push(row)
+      }
+    })
+
+    // 마지막 거래처 처리
+    if (currentStoreRows.length > 0) {
+      const sortedStoreRows = sortStoreRows(currentStoreRows)
+      result.push(...sortedStoreRows)
+    }
+
+    // 거래처 내 행들을 상품코드별로 정렬하는 함수
+    function sortStoreRows(rows: any[][]): any[][] {
+      return [...rows].sort((a, b) => {
+        const productCodeA = String(a[4] || '').toLowerCase()
+        const productCodeB = String(b[4] || '').toLowerCase()
+
+        // 상품코드가 다르면 상품코드로 정렬
+        if (productCodeA !== productCodeB) {
+          return productCodeA.localeCompare(productCodeB)
+        }
+
+        // 같은 상품코드 내에서는 I열(주문) > J열(미송) > K열(교환) 순서
+        const iValueA = parseFloat(a[8]) || 0
+        const iValueB = parseFloat(b[8]) || 0
+        const jValueA = parseFloat(a[9]) || 0
+        const jValueB = parseFloat(b[9]) || 0
+        const kValueA = parseFloat(a[10]) || 0
+        const kValueB = parseFloat(b[10]) || 0
+
+        // 주문(I)이 있는 것을 먼저
+        if (iValueA > 0 && iValueB === 0) return -1
+        if (iValueA === 0 && iValueB > 0) return 1
+        // 미송(J)이 있는 것을 그 다음
+        if (jValueA > 0 && jValueB === 0) return -1
+        if (jValueA === 0 && jValueB > 0) return 1
+        // 교환(K)이 있는 것을 마지막
+        if (kValueA > 0 && kValueB === 0) return -1
+        if (kValueA === 0 && kValueB > 0) return 1
+
+        return 0
+      })
+    }
+
+    // 정렬된 데이터 재구성
+    const sortedData = [...headerRows, ...result]
+
+    // 행 번호 매핑 생성 (원래 인덱스 -> 새 인덱스)
+    const oldToNewIndexMap: {[key: number]: number} = {}
+    dataRows.forEach((row, oldIdx) => {
+      const newIdx = result.findIndex(r => r === row)
+      if (newIdx !== -1) {
+        oldToNewIndexMap[oldIdx + 4] = newIdx + 4 // +4는 헤더 행 때문
+      }
+    })
+
+    // 색상 정보 재매핑
+    const newColors: {[key: number]: string} = {}
+    const newTextColors: {[key: number]: string} = {}
+    const newDuplicates: {[key: number]: string} = {}
+
+    Object.keys(colors).forEach(oldIdx => {
+      const newIdx = oldToNewIndexMap[Number(oldIdx)]
+      if (newIdx !== undefined) {
+        newColors[newIdx] = colors[Number(oldIdx)]
+      }
+    })
+
+    Object.keys(textColors).forEach(oldIdx => {
+      const newIdx = oldToNewIndexMap[Number(oldIdx)]
+      if (newIdx !== undefined) {
+        newTextColors[newIdx] = textColors[Number(oldIdx)]
+      }
+    })
+
+    Object.keys(duplicates).forEach(oldIdx => {
+      const newIdx = oldToNewIndexMap[Number(oldIdx)]
+      if (newIdx !== undefined) {
+        newDuplicates[newIdx] = duplicates[Number(oldIdx)]
+      }
+    })
+
+    return {
+      data: sortedData,
+      colors: newColors,
+      textColors: newTextColors,
+      duplicates: newDuplicates
+    }
+  }
+
+  // (L+M+N)값과 O값 비교하여 행 색상 및 P열(차이) 계산
+  const calculateRowColorsAndDifferences = (data: any[][], unmatchedIndices: number[] = []) => {
+    const colors: {[key: number]: string} = {}
+    const textColors: {[key: number]: string} = {}
+    const duplicates: {[key: number]: string} = {}
+    const updatedData = data.map(row => [...row])
+
+    // 매칭 실패한 행들을 빨간 글자로 표시
+    unmatchedIndices.forEach(idx => {
+      textColors[idx] = '#dc3545' // red text
+    })
+
+    console.log('=== 색상 계산 시작 ===')
+
+    // 상품코드별 행 정보 수집
+    const productCodeMap: {[key: string]: Array<{rowIndex: number, storeName: string, iValue: number, jValue: number, kValue: number}> } = {}
+
+    // 5행부터 확인 (index 4부터)
+    for (let i = 4; i < data.length; i++) {
+      const storeName = data[i][0]  // A열: 거래처명
+      const address = data[i][1]     // B열: 주소
+      const productName = data[i][5] // F열: 상품명
+      const productCode = data[i][4] // E열: 공급처상품명 (상품코드)
+
+      // 유효한 행인지 확인 (A, B, F열 중 하나라도 값이 있어야 함)
+      const isValidRow = (storeName && storeName !== '') ||
+                        (address && address !== '') ||
+                        (productName && productName !== '')
+
+      // 유효하지 않은 행이거나 상품코드가 없으면 스킵
+      if (!isValidRow || !productCode || productCode === '') {
+        continue
+      }
+
+      const iValue = parseFloat(data[i][8]) || 0   // I열: 발주
+      const jValue = parseFloat(data[i][9]) || 0   // J열: 미송
+      const kValue = parseFloat(data[i][10]) || 0  // K열: 교환
+
+      if (!productCodeMap[productCode]) {
+        productCodeMap[productCode] = []
+      }
+
+      productCodeMap[productCode].push({
+        rowIndex: i,
+        storeName: storeName,
+        iValue: iValue,
+        jValue: jValue,
+        kValue: kValue
+      })
+    }
+
+    // 중복 상품코드 감지 및 툴팁 생성
+    for (const productCode in productCodeMap) {
+      const rows = productCodeMap[productCode]
+      if (rows.length > 1) {
+        // 중복된 상품코드
+        let tooltip = `⚠️ 동일 상품코드가 ${rows.length}건 존재:\n\n`
+
+        rows.forEach((row, index) => {
+          const types = []
+          if (row.iValue > 0) types.push(`정상 ${row.iValue}건`)
+          if (row.jValue > 0) types.push(`미송 ${row.jValue}건`)
+          if (row.kValue > 0) types.push(`교환 ${row.kValue}건`)
+
+          // 데이터 행 번호: 헤더 4행을 제외하고 카운트 (인덱스 4 → 1행, 인덱스 5 → 2행, ...)
+          const dataRowNumber = row.rowIndex - 3
+          tooltip += `${index + 1}. ${row.storeName} (${dataRowNumber}행): ${types.join(', ')}\n`
+        })
+
+        // 각 행에 툴팁 저장
+        rows.forEach(row => {
+          duplicates[row.rowIndex] = tooltip
+        })
+
+        console.log(`중복 상품코드 [${productCode}]: ${rows.length}건`)
+      }
+    }
+
+    // 색상 및 차이값 계산
+    for (let i = 4; i < data.length; i++) {
+      const iValue = parseFloat(data[i][8]) || 0   // I열: 신규주문
+      const lValue = parseFloat(data[i][11]) || 0  // L열: 장끼
+      const mValue = parseFloat(data[i][12]) || 0  // M열: 장끼미송
+      const nValue = parseFloat(data[i][13]) || 0  // N열: 장끼 교환
+      const oValue = parseFloat(data[i][14]) || 0  // O열: 입고
+      const kValue = parseFloat(data[i][10]) || 0  // K열: 교환
+
+      // 빈 행 체크 (거래처명이 없으면 빈 행)
+      const storeName = data[i][0]
+      if (!storeName) {
+        continue
+      }
+
+      // K열에 값이 있으면 글자색 빨간색 (이미 빨간색이 아닌 경우만)
+      if (kValue > 0 && !textColors[i]) {
+        textColors[i] = '#dc3545' // red text
+        console.log(`행 ${i+1}: K=${kValue} → 글자색 빨간색`)
+      }
+
+      // (L+M+N) 합계 계산
+      const totalLMN = lValue + mValue + nValue
+
+      console.log(`행 ${i+1}: I=${iValue}, L=${lValue}, M=${mValue}, N=${nValue}, O=${oValue}, 합계=${totalLMN}`)
+
+      // 배경색 결정: (L+M+N) = O이고 O > 0인 경우 초록색
+      // 장끼 합계가 입고와 일치하면 완료된 것으로 간주
+      if (totalLMN === oValue && oValue > 0) {
+        // 완료된 항목: 연한 초록색
+        colors[i] = '#d4edda' // light green
+        updatedData[i][15] = '' // P열: 차이 없음 (빈 문자열)
+        console.log(`  → 초록색 (L+M+N=${totalLMN} = O=${oValue}, 완료)`)
+      } else if (oValue > 0 && totalLMN !== oValue) {
+        // 입고가 있는데 차이가 있는 항목: 연한 빨간색
+        colors[i] = '#f8d7da' // light red
+        updatedData[i][15] = '차이 있음' // P열: 차이 있음 (문자 표기)
+        console.log(`  → 빨간색 (차이: O=${oValue}, L+M+N=${totalLMN})`)
+      } else {
+        // 기타 경우: 배경색 없음 (흰색)
+        updatedData[i][15] = '' // P열: 차이 없음 (빈 문자열)
+        console.log(`  → 배경색 없음 (O=${oValue}, L+M+N=${totalLMN})`)
+      }
+    }
+
+    console.log('배경색 맵:', colors)
+    console.log('글자색 맵:', textColors)
+    console.log('중복 상품 맵:', duplicates)
+
+    return {
+      finalData: updatedData,
+      colors: colors,
+      textColors: textColors,
+      duplicates: duplicates
+    }
+  }
+
+  const handleZoomIn = () => {
+    setZoom((prev) => Math.min(prev + 10, 200))
+  }
+
+  const handleZoomOut = () => {
+    setZoom((prev) => Math.max(prev - 10, 50))
+  }
+
+  const handleZoomReset = () => {
+    setZoom(100)
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+          <p className="mt-4 text-gray-600">데이터를 불러오는 중...</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 flex flex-col">
+      {/* Work in Progress Dialog - 비활성화 */}
+      {/* {showWorkInProgressDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md">
+            <h3 className="text-lg font-semibold mb-4">작업 중인 파일 발견</h3>
+            <p className="mb-6">
+              작업 중인 주문서가 있습니다.<br />
+              <strong>({workInProgressFile})</strong><br />
+              이어서 작업하시겠습니까?
+            </p>
+            <div className="flex justify-end space-x-4">
+              <button
+                onClick={() => handleContinueWork(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+              >
+                아니오
+              </button>
+              <button
+                onClick={() => handleContinueWork(true)}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
+              >
+                예
+              </button>
+            </div>
+          </div>
+        </div>
+      )} */}
+      {/* Header */}
+      <header className="bg-white shadow-sm border-b">
+        <div className="px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <FileSpreadsheet className="h-8 w-8 text-indigo-600" />
+              <div>
+                <h1 className="text-2xl font-bold text-gray-900">GNDR 발주 관리 시스템</h1>
+                <p className="text-sm text-gray-500">로그인: {username}</p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-4">
+              {/* Zoom Controls */}
+              <div className="flex items-center space-x-2 border rounded-lg px-3 py-1">
+                <button
+                  onClick={handleZoomOut}
+                  className="p-1 hover:bg-gray-100 rounded"
+                  title="축소"
+                >
+                  <ZoomOut className="h-4 w-4" />
+                </button>
+                <span className="text-sm font-medium w-12 text-center">{zoom}%</span>
+                <button
+                  onClick={handleZoomIn}
+                  className="p-1 hover:bg-gray-100 rounded"
+                  title="확대"
+                >
+                  <ZoomIn className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={handleZoomReset}
+                  className="p-1 hover:bg-gray-100 rounded"
+                  title="원래 크기"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Upload Buttons */}
+              <button
+                onClick={() => {
+                  const fileInput = document.getElementById('file-upload-input') as HTMLInputElement;
+                  if (fileInput) {
+                    fileInput.click();
+                  }
+                }}
+                className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                주문서 업로드
+              </button>
+              <input
+                id="file-upload-input"
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileUpload}
+                className="hidden"
+                style={{ display: 'none' }}
+              />
+
+              {/* 주문 입고 파일 업로드 버튼 - 주문서가 로드된 경우에만 표시 */}
+              {sheets.length > 0 && sheets[selectedSheet]?.data && sheets[selectedSheet].data.length > 0 && (
+                <>
+                  <button
+                    onClick={() => {
+                      const fileInput = document.getElementById('order-receipt-upload-input') as HTMLInputElement;
+                      if (fileInput) {
+                        fileInput.click();
+                      }
+                    }}
+                    className="inline-flex items-center px-4 py-2 border border-green-600 rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    주문 입고 파일 업로드
+                  </button>
+                  <input
+                    id="order-receipt-upload-input"
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={handleOrderReceiptUpload}
+                    className="hidden"
+                    style={{ display: 'none' }}
+                  />
+                </>
+              )}
+
+              {/* 입고전표 업로드 버튼 - 주문 입고 파일이 업로드된 경우에만 활성화 */}
+              {sheets.length > 0 && sheets[selectedSheet]?.data && sheets[selectedSheet].data.length > 0 && (
+                <>
+                  <button
+                    onClick={() => {
+                      if (!isOrderReceiptUploaded) {
+                        toast.error('먼저 주문 입고 파일을 업로드해주세요.')
+                        return
+                      }
+                      const fileInput = document.getElementById('receipt-slip-upload-input') as HTMLInputElement;
+                      if (fileInput) {
+                        fileInput.click();
+                      }
+                    }}
+                    disabled={!isOrderReceiptUploaded}
+                    className={`inline-flex items-center px-4 py-2 border rounded-md shadow-sm text-sm font-medium ${
+                      isOrderReceiptUploaded
+                        ? 'border-purple-600 text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500'
+                        : 'border-gray-300 text-gray-400 bg-gray-100 cursor-not-allowed'
+                    }`}
+                  >
+                    <FileSpreadsheet className="h-4 w-4 mr-2" />
+                    입고전표 업로드
+                  </button>
+                  <input
+                    id="receipt-slip-upload-input"
+                    type="file"
+                    accept=".xlsx,.xls"
+                    onChange={handleReceiptSlipUpload}
+                    className="hidden"
+                    style={{ display: 'none' }}
+                  />
+                </>
+              )}
+
+              {/* Reload Button */}
+              <button
+                onClick={loadExcelData}
+                className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              >
+                <RefreshCw className="h-4 w-4 mr-2" />
+                새로고침
+              </button>
+
+              {/* 중간 저장 버튼 */}
+              {hasUnsavedChanges && (
+                <button
+                  onClick={saveDraft}
+                  className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  중간 저장
+                </button>
+              )}
+
+              {/* Logout Button */}
+              <button
+                onClick={handleLogout}
+                className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+              >
+                <LogOut className="h-4 w-4 mr-2" />
+                로그아웃
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Navigation Tabs */}
+      <div className="bg-white border-b">
+        <div className="px-4 sm:px-6 lg:px-8">
+          <div className="flex space-x-4 py-2">
+            <button
+              onClick={() => setActiveTab('spreadsheet')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                activeTab === 'spreadsheet'
+                  ? 'bg-indigo-100 text-indigo-700 border-b-2 border-indigo-500'
+                  : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+              }`}
+            >
+              스프레드시트
+            </button>
+            <button
+              onClick={() => setActiveTab('fileManagement')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                activeTab === 'fileManagement'
+                  ? 'bg-indigo-100 text-indigo-700 border-b-2 border-indigo-500'
+                  : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+              }`}
+            >
+              파일 관리
+            </button>
+            <button
+              onClick={() => setActiveTab('paymentManagement')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                activeTab === 'paymentManagement'
+                  ? 'bg-indigo-100 text-indigo-700 border-b-2 border-indigo-500'
+                  : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+              }`}
+            >
+              입금 관리
+            </button>
+            <button
+              onClick={() => setActiveTab('orderManagement')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                activeTab === 'orderManagement'
+                  ? 'bg-indigo-100 text-indigo-700 border-b-2 border-indigo-500'
+                  : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+              }`}
+            >
+              발주 관리
+            </button>
+            <button
+              onClick={() => setActiveTab('clientManagement')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+                activeTab === 'clientManagement'
+                  ? 'bg-indigo-100 text-indigo-700 border-b-2 border-indigo-500'
+                  : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+              }`}
+            >
+              거래처 관리
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Sheet Tabs - Only show when on spreadsheet tab */}
+      {activeTab === 'spreadsheet' && sheets.length > 0 && (
+        <div className="bg-gray-50 border-b">
+          <div className="px-4 sm:px-6 lg:px-8">
+            <div className="flex space-x-1 overflow-x-auto py-2">
+              {/* Add new sheet button */}
+              <button
+                onClick={() => {
+                  // Create 100 empty rows for data entry
+                  const emptyRows = Array(100).fill(null).map(() =>
+                    Array(23).fill('')
+                  )
+
+                  const newSheet = {
+                    sheet_name: `New Sheet`,
+                    data: [
+                      // Row 1: 그룹 헤더 (병합된 셀 표시용)
+                      ['', '', '', '', '', '', '', '', '발주', '', '', '장끼', '', '', '입고/차이', '', '삼촌 코멘트', '', '', '', '', '', ''],
+                      // Row 2: 실제 컬럼명
+                      ['거래처명', '공급처주소', '공급처연락처', '공급처휴대전화', '상품코드', '공급처상품명', '공급처옵션', '원가', '신규주문', '미송', '교환', '장끼', '미송', '교환', '입고', '차이', '삼촌코멘트', '비고', '입고액', '입금액', '차액', '날짜', '확인'],
+                      // Row 3: 합계 행 (0으로 초기화)
+                      ['', '', '', '', '', '', '', '', 0, 0, 0, 0, 0, 0, 0, 0, '', '', 0, 0, 0, '', ''],
+                      // Row 4: 구분선 (빈 행)
+                      ['', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ''],
+                      // Add 100 empty rows for data entry
+                      ...emptyRows
+                    ],
+                    columns: ['거래처명', '공급처주소', '공급처연락처', '공급처휴대전화', '상품코드', '공급처상품명', '공급처옵션', '원가', '신규주문', '미송', '교환', '장끼', '미송', '교환', '입고', '차이', '삼촌코멘트', '비고', '입고액', '입금액', '차액', '날짜', '확인'],
+                    rows: 104, // 4 header rows + 100 data rows
+                    cols: 23,
+                    sheet_type: '편집용'
+                  }
+
+                  // Insert the new sheet at position 1 (right after the + button)
+                  const newSheets = [...sheets]
+                  if (sheets.length === 0) {
+                    newSheets.push(newSheet)
+                  } else {
+                    // Insert at position 0 (first position after + button)
+                    newSheets.unshift(newSheet)
+                  }
+
+                  setSheets(newSheets)
+                  setSelectedSheet(0) // Select the newly created sheet
+                  toast.success('새 시트가 추가되었습니다')
+                }}
+                className="px-3 py-1 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors text-gray-600 hover:text-indigo-700 hover:bg-gray-100 border border-gray-200"
+                title="새 시트 추가"
+              >
+                +
+              </button>
+
+              {sheets.map((sheet, index) => (
+                <div key={index} className="inline-flex items-center">
+                  {editingSheet === index ? (
+                    <div className="flex items-center">
+                      <input
+                        type="text"
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            handleSaveSheetName(index)
+                          } else if (e.key === 'Escape') {
+                            handleCancelEditingSheetName()
+                          }
+                        }}
+                        className="px-2 py-1 text-sm border border-indigo-500 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        autoFocus
+                      />
+                      <button
+                        onClick={() => handleSaveSheetName(index)}
+                        className="ml-1 px-2 py-1 text-xs text-white bg-indigo-600 rounded hover:bg-indigo-700"
+                      >
+                        저장
+                      </button>
+                      <button
+                        onClick={handleCancelEditingSheetName}
+                        className="ml-1 px-2 py-1 text-xs text-gray-600 bg-gray-200 rounded hover:bg-gray-300"
+                      >
+                        취소
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setSelectedSheet(index)}
+                      onDoubleClick={() => handleStartEditingSheetName(index)}
+                      className={`px-3 py-1 text-sm font-medium rounded-t-lg whitespace-nowrap transition-colors ${
+                        selectedSheet === index
+                          ? 'bg-white text-indigo-700 border border-gray-200 border-b-white'
+                          : 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
+                      }`}
+                      title="더블클릭하여 이름 변경"
+                    >
+                      {sheet.sheet_name}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Content */}
+      <main className="flex-1 overflow-hidden bg-gray-50">
+        {activeTab === 'paymentManagement' ? (
+          <PaymentManagement />
+        ) : activeTab === 'orderManagement' ? (
+          <OrderManagement />
+        ) : activeTab === 'clientManagement' ? (
+          <ClientManagement />
+        ) : activeTab === 'fileManagement' ? (
+          <FileManagement />
+        ) : sheets.length > 0 ? (
+          <div className="h-full flex flex-col">
+            {/* File info bar */}
+            <div className="bg-white border-b px-4 py-2 flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <FileSpreadsheet className="h-4 w-4 text-gray-500" />
+                <span className="text-sm text-gray-600">
+                  현재 파일: {sheets[0]?.file_path || localStorage.getItem('current_filename') || '파일 없음'}
+                </span>
+                <span className="text-sm text-gray-500">
+                  ({sheets.length}개 시트, {sheets[selectedSheet].rows}행 × {sheets[selectedSheet].cols}열)
+                </span>
+              </div>
+              <span className="text-sm text-gray-500">
+                시트 타입: {sheets[selectedSheet].sheet_type || '주문서'}
+              </span>
+            </div>
+
+            <SpreadsheetView
+              data={sheets[selectedSheet].data}
+              columns={sheets[selectedSheet].columns}
+              zoom={zoom}
+              sheetName={sheets[selectedSheet].sheet_name}
+              showFileManagement={() => setActiveTab('fileManagement')}
+              onSaveToFile={handleSaveToFile}
+              rowColors={rowColors}
+              rowTextColors={rowTextColors}
+              duplicateProducts={duplicateProducts}
+              checkedRows={checkedRows}
+              onCheckRow={handleCheckRow}
+              onSendToPayment={moveCheckedToPayment}
+              onSendToOrder={moveCheckedToOrder}
+              onUndoDelete={handleUndoDelete}
+              hasBackup={backupBeforeDelete !== null}
+              isEditSheet={sheets[selectedSheet].sheet_type === '편집용'}
+              onClientNameClick={handleClientNameClick}
+              onDataChange={(rowIndex, colIndex, value) => {
+                console.log(`Cell changed: Row ${rowIndex}, Col ${colIndex}, Value: ${value}`)
+                // Update the sheets data
+                const updatedSheets = [...sheets]
+                if (updatedSheets[selectedSheet]) {
+                  updatedSheets[selectedSheet].data[rowIndex][colIndex] = value
+                  setSheets(updatedSheets)
+
+                  // 편집용 시트이고 데이터가 추가되면 자동으로 색상 계산 실행
+                  if (sheets[selectedSheet].sheet_type === '편집용' && updatedSheets[selectedSheet].data.length > 4) {
+                    setTimeout(() => {
+                      const result = calculateRowColorsAndDifferences(updatedSheets[selectedSheet].data)
+                      setRowColors(result.colors)
+                      setRowTextColors(result.textColors)
+                      setDuplicateProducts(result.duplicates)
+                      toast.success('데이터 정합성 검사 완료')
+                    }, 100)
+                  }
+                }
+              }}
+              onSave={async (data) => {
+                const loadingToast = toast.loading('데이터 저장 중...')
+                try {
+                  const currentSheet = sheets[selectedSheet]
+                  const response = await excelAPI.updateExcel({
+                    sheet_name: currentSheet.sheet_name,
+                    data: data,
+                    columns: currentSheet.columns,
+                    rows: data.length,
+                    cols: data[0]?.length || 0
+                  })
+
+                  if (response.success) {
+                    toast.success('데이터가 성공적으로 저장되었습니다!', { id: loadingToast })
+                  } else {
+                    toast.error('저장에 실패했습니다.', { id: loadingToast })
+                  }
+                } catch (error: any) {
+                  console.error('Save error:', error)
+                  toast.error(`저장 오류: ${error.message}`, { id: loadingToast })
+                }
+              }}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <FileSpreadsheet className="h-16 w-16 text-gray-400 mx-auto mb-4" />
+              <p className="text-xl text-gray-600">엑셀 파일을 업로드해주세요</p>
+              <button
+                onClick={() => {
+                  const fileInput = document.getElementById('file-upload-input-bottom') as HTMLInputElement;
+                  if (fileInput) {
+                    fileInput.click();
+                  }
+                }}
+                className="mt-4 inline-flex items-center px-6 py-3 border border-transparent rounded-md shadow-sm text-base font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              >
+                <Upload className="h-5 w-5 mr-2" />
+                파일 선택
+              </button>
+              <input
+                id="file-upload-input-bottom"
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={handleFileUpload}
+                className="hidden"
+                style={{ display: 'none' }}
+              />
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* 작업 이탈 방지 모달 */}
+      <UnsavedChangesModal
+        isOpen={showUnsavedModal}
+        onSaveDraft={handleSaveDraftAndNavigate}
+        onContinueWork={handleContinueEditing}
+        onDiscard={handleDiscardChanges}
+      />
+
+      {/* 저장 모달 */}
+      {showSaveModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h2 className="text-xl font-bold mb-4">파일 저장</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              체크된 {Object.keys(checkedRows).filter(k => checkedRows[parseInt(k)]).length}개 항목이 제외되어 저장됩니다.
+            </p>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                파일명
+              </label>
+              <input
+                type="text"
+                value={saveFileName}
+                onChange={(e) => setSaveFileName(e.target.value)}
+                placeholder="파일명을 입력하세요"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSaveToWeb()
+                  }
+                }}
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleSaveToWeb}
+                className="flex-1 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                웹에 저장
+              </button>
+              <button
+                onClick={handleDownloadExcel}
+                className="flex-1 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                엑셀 다운로드
+              </button>
+              <button
+                onClick={() => {
+                  setShowSaveModal(false)
+                  setSaveFileName('')
+                }}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+              >
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 입금일자 선택 모달 */}
+      {showPaymentDateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h2 className="text-xl font-bold mb-4">입금 일자 선택</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              체크된 {Object.keys(checkedRows).filter(k => checkedRows[parseInt(k)]).length}개 항목의 입금 일자를 선택하세요.
+            </p>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                입금 일자
+              </label>
+              <input
+                type="date"
+                value={selectedPaymentDate}
+                onChange={(e) => setSelectedPaymentDate(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setShowPaymentDateModal(false)
+                }}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+              >
+                취소
+              </button>
+              <button
+                onClick={confirmPaymentDate}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 발주일자 선택 모달 */}
+      {showOrderDateModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h2 className="text-xl font-bold mb-4">발주 일자 선택</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              체크된 {Object.keys(checkedRows).filter(k => checkedRows[parseInt(k)]).length}개 항목의 발주 일자를 선택하세요.
+            </p>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                발주 일자
+              </label>
+              <input
+                type="date"
+                value={selectedOrderDate}
+                onChange={(e) => setSelectedOrderDate(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-green-500 focus:border-green-500"
+              />
+            </div>
+
+            <div className="mb-6">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                발주 유형
+              </label>
+              <select
+                value={orderType}
+                onChange={(e) => setOrderType(e.target.value as '교환' | '미송' | '기타')}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-green-500 focus:border-green-500"
+              >
+                <option value="교환">교환</option>
+                <option value="미송">미송</option>
+                <option value="기타">기타</option>
+              </select>
+            </div>
+
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => {
+                  setShowOrderDateModal(false)
+                }}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+              >
+                취소
+              </button>
+              <button
+                onClick={confirmOrderDate}
+                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                확인
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 거래처 정보 모달 */}
+      {showClientInfoModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold">거래처 정보</h2>
+              <button
+                onClick={() => {
+                  setShowClientInfoModal(false)
+                  setSelectedClientInfo(null)
+                }}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {loadingClientInfo ? (
+              <div className="text-center py-8">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                <p className="mt-2 text-gray-600">조회 중...</p>
+              </div>
+            ) : selectedClientInfo ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Code</label>
+                    <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.code}</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">업체명</label>
+                    <p className="text-sm bg-gray-50 p-2 rounded font-semibold">{selectedClientInfo.company_name}</p>
+                  </div>
+                </div>
+
+                {selectedClientInfo.contact_person && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">담당자명</label>
+                    <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.contact_person}</p>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
+                  {selectedClientInfo.phone && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">연락처</label>
+                      <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.phone}</p>
+                    </div>
+                  )}
+                  {selectedClientInfo.mobile && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">휴대폰</label>
+                      <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.mobile}</p>
+                    </div>
+                  )}
+                </div>
+
+                {(selectedClientInfo.address || selectedClientInfo.address_detail) && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">주소</label>
+                    <p className="text-sm bg-gray-50 p-2 rounded">
+                      {selectedClientInfo.address}
+                      {selectedClientInfo.address_detail && ` ${selectedClientInfo.address_detail}`}
+                    </p>
+                  </div>
+                )}
+
+                {(selectedClientInfo.account_number || selectedClientInfo.bank_name || selectedClientInfo.account_holder) && (
+                  <div className="border-t pt-4">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-2">계좌 정보</h3>
+                    <div className="grid grid-cols-3 gap-4">
+                      {selectedClientInfo.bank_name && (
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">은행</label>
+                          <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.bank_name}</p>
+                        </div>
+                      )}
+                      {selectedClientInfo.account_number && (
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">계좌번호</label>
+                          <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.account_number}</p>
+                        </div>
+                      )}
+                      {selectedClientInfo.account_holder && (
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">예금주</label>
+                          <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.account_holder}</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {selectedClientInfo.notes && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">비고</label>
+                    <p className="text-sm bg-gray-50 p-2 rounded">{selectedClientInfo.notes}</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                거래처 정보를 찾을 수 없습니다
+              </div>
+            )}
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => {
+                  setShowClientInfoModal(false)
+                  setSelectedClientInfo(null)
+                }}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default Dashboard

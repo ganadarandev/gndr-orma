@@ -1,0 +1,83 @@
+/* Custom Handsontable styles for Korean Order Management */
+
+/* Override default Handsontable styles for better visibility */
+.handsontable {
+  font-family: 'Malgun Gothic', '맑은 고딕', sans-serif !important;
+  font-size: 11px !important;
+}
+
+.handsontable td {
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  vertical-align: middle !important;
+  line-height: 1.4 !important;
+}
+
+.handsontable th {
+  background-color: #e8e8e8 !important;
+  font-weight: bold !important;
+  border: 1px solid #ccc !important;
+  text-align: center !important;
+}
+
+/* Row headers */
+.handsontable .ht_clone_left th {
+  background-color: #f0f0f0 !important;
+  min-width: 40px !important;
+}
+
+/* Merged cells */
+.handsontable .htMergedCell {
+  background-color: #f5f5f5 !important;
+  text-align: center !important;
+  font-weight: bold !important;
+}
+
+/* Yellow highlight for totals */
+.yellow-highlight {
+  background-color: #ffff00 !important;
+  font-weight: bold !important;
+}
+
+/* Red highlight for special items */
+.red-highlight {
+  background-color: #ffcccc !important;
+  color: #ff0000 !important;
+}
+
+/* Light yellow for quantity cells */
+.light-yellow {
+  background-color: #fffacd !important;
+}
+
+/* Border styles */
+.handsontable .htBordered td {
+  border: 1px solid #d0d0d0 !important;
+}
+
+/* Hide overflow scrollbars for better appearance */
+.ht_master .wtHolder {
+  overflow: auto !important;
+}
+
+/* Column header alignment */
+.handsontable .colHeader {
+  text-align: center !important;
+  vertical-align: middle !important;
+}
+
+/* Ensure cells are properly sized */
+.handsontable col {
+  width: auto !important;
+}
+
+/* Hover effect */
+.handsontable tbody tr:hover td {
+  background-color: #f9f9f9 !important;
+}
+
+/* Selected cell highlight */
+.handsontable .ht__highlight {
+  background-color: #cce5ff !important;
+}

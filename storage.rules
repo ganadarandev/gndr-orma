@@ -1,0 +1,25 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Excel files directory
+    match /excel/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() &&
+        request.resource.size < 50 * 1024 * 1024 && // 50MB limit
+        (request.resource.contentType.matches('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') ||
+         request.resource.contentType.matches('application/vnd.ms-excel'));
+    }
+
+    // Uploaded files directory - Allow public access for admin uploads
+    match /uploads/{allPaths=**} {
+      allow read: if true; // Anyone can read
+      allow write: if request.resource.size < 50 * 1024 * 1024; // Anyone can write up to 50MB
+    }
+  }
+}
